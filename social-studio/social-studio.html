@@ -1200,6 +1200,7 @@ input[type=color]::-webkit-color-swatch-wrapper{padding:0}input[type=color]::-we
       <div class="igvopts" id="igVOpts" hidden>
         <div class="igvsound" role="radiogroup" aria-label="Son du montage"><b>Son</b>
           <label><input type="radio" name="igVSound" value="keep"><span><b>Garder les voix de mes vidéos</b><small>Le son d'origine est conservé, sans voix off générée. La durée suit celle de vos vidéos.</small></span></label>
+          <label><input type="radio" name="igVSound" value="mix"><span><b>Voix off du scénario + son de mes vidéos, baissé</b><small>La voix off (importée ou ElevenLabs) passe au premier plan, le son d'origine des vidéos reste en fond. Réglage conseillé dès qu'il y a une voix off.</small></span></label>
           <label><input type="radio" name="igVSound" value="voiceoff"><span><b>Couper le son et mettre la voix off du scénario</b><small>La voix off de l'encart « Voix off » plus bas (ElevenLabs, fichier ou navigateur) remplace le son des vidéos, avec sous-titres.</small></span></label>
         </div>
         <label class="ignoillu"><input type="checkbox" id="igVFx"><span><b>Animer ma vidéo</b><small>Titres, textes et effets du scénario apparaissent sur la vidéo, scène par scène, avec la signature de fin.</small></span></label>
@@ -3852,7 +3853,9 @@ const igClipEls = {};
 /* ---- VIDEO MONTAGE: the person's videos chained, with their own sound or the scenario voice-off, optional animated overlays ---- */
 const igVids = a => a?.videos?.length ? a.videos : a?.clip?.id ? [a.clip] : [];
 const igMontage = a => !!(a?.vChain && igVids(a).length);
-const igVKeep = a => igMontage(a) && a.vSound !== "voiceoff";
+const igHasVoMode = a => a?.voiceMode === "file" || a?.voiceMode === "eleven";
+const igVSnd = a => ["keep", "voiceoff", "mix"].includes(a?.vSound) ? a.vSound : igHasVoMode(a) ? "mix" : "keep";
+const igVKeep = a => igMontage(a) && igVSnd(a) !== "voiceoff";
 const igVidOnly = a => igMontage(a) && !!a.vOnly;
 const igVidDur = v => { const d = igClipEls[v.id]?.duration; return isFinite(d) && d > 0 ? d : +v.dur || 0; };
 /* keep-sound montage: the videos set the length, the scenes are spread over it in proportion */
@@ -3875,7 +3878,8 @@ function igVidRoute(a){
   if(!igVKeep(a)) return null;
   try{
     if(!igVAC){ igVAC = new (window.AudioContext || window.webkitAudioContext)(); igVDest = igVAC.createMediaStreamDestination(); }
-    igVids(a).forEach(x => { const el = igClipEl(x.id); if(!el._src){ el._src = igVAC.createMediaElementSource(el); el._src.connect(igVDest); el._src.connect(igVAC.destination); } });
+    const gv = igVSnd(a) === "mix" && igFileVoice() ? .3 : 1;
+    igVids(a).forEach(x => { const el = igClipEl(x.id); if(!el._src){ el._src = igVAC.createMediaElementSource(el); el._g = igVAC.createGain(); el._src.connect(el._g); el._g.connect(igVDest); el._g.connect(igVAC.destination); } el._g.gain.value = gv; });
     if(igVAC.state === "suspended") igVAC.resume().catch(() => {});
   }catch(e){}
   return igVDest;
@@ -5149,7 +5153,7 @@ function igVidsUI(a){
   const vs = igVids(a), m = !!a?.vChain, tot = vs.reduce((s, v) => s + igVidDur(v), 0);
   $("#igVids").innerHTML = vs.length ? vs.map((v, j) => `<figure><video src="/_blob/${esc(v.id)}#t=0.5" muted playsinline preload="metadata"></video><figcaption><b>${j + 1}.</b> ${esc(v.name)}${igVidDur(v) ? ` · ${igFmt(igVidDur(v))}` : ""}</figcaption><div class="igvbtn">${j ? `<button class="btn small ghost" data-igvup="${j}" aria-label="Avancer la vidéo ${j + 1}" title="Avancer dans le montage">↑</button>` : ""}<button class="btn small ghost" data-igvdel="${j}" aria-label="Retirer la vidéo ${j + 1}">✕</button></div></figure>`).join("") : `<span class="hint">Aucune vidéo pour l'instant.</span>`;
   $("#igVChain").checked = m; $("#igVOpts").hidden = !m;
-  document.querySelectorAll('[name="igVSound"]').forEach(r => r.checked = r.value === (a?.vSound === "voiceoff" ? "voiceoff" : "keep"));
+  document.querySelectorAll('[name="igVSound"]').forEach(r => r.checked = r.value === igVSnd(a));
   $("#igVFx").checked = !!a?.vFx; $("#igVOnly").checked = !!a?.vOnly; igFrameUI(a);
   $("#igVInfo").textContent = !m ? (vs.length ? "Sans enchaînement : des extraits de vos vidéos sont intercalés entre les scènes animées (avec le rythme « Premium luxe », elles alternent avec vos photos en fondu enchaîné)." : "") : !vs.length ? "Ajoutez au moins une vidéo pour faire le montage." : igVKeep(a) ? `Montage de ${vs.length} vidéo(s)${tot ? `, ${igFmt(tot)}` : ""}, avec leur son d'origine : pas de voix off générée.` : `Montage de ${vs.length} vidéo(s), son coupé : la voix off du scénario est utilisée${tot ? ` (les vidéos reprennent au début si la voix dure plus de ${igFmt(tot)})` : ""}.`;
   $("#igVoKeep").hidden = !igVKeep(a);
@@ -5243,22 +5247,39 @@ async function igFitVoice(durHint){
   if(igCur && !igIlluRun && igCur.scenes.some(s => igNeedsSvg(s) && !s.svg) && sample) igIllustrate($("#igIlluSt2"));
   return true;
 }
-const igFileVoice = () => !igVKeep(igCur) && (igCur?.voiceMode === "file" || igCur?.voiceMode === "eleven");
+const igFileVoice = () => igHasVoMode(igCur) && !(igMontage(igCur) && igVSnd(igCur) === "keep");
 /* une voix ajoutée par Claude pendant que l'animation est ouverte : on la reprend */
 function igAdoptVoice(){
   const d = igCur?.id && (S.all.ianims || []).find(x => x.id === igCur.id);
   if(!d?.voiceId || d.voiceId === igCur.voiceId) return;
   igStop(); Object.assign(igCur, {voiceId:d.voiceId, voiceName:d.voiceName, voiceMode:d.voiceMode || igCur.voiceMode}); delete igCur.elPending; $("#igElPend").hidden = true;
-  igSetVoice(null, "/_blob/" + d.voiceId); fetch(igVoice.url).then(r => r.blob()).then(b => { if(igVoice){ igVoice.blob = b; if(d.voiceSync !== "audio" || d.voiceText !== igVoText()) igFitVoice(); } }).catch(() => {});
+  igCur.voiceEnc = d.voiceEnc; igLoadVoice(d, () => { if(d.voiceSync !== "audio" || d.voiceText !== igVoText()) igFitVoice(); });
   $("#igElSt").className = "status ok"; $("#igElSt").textContent = (d.voiceName || "Voix off") + " · ajoutée, incluse dans la vidéo"; $("#igVoiceName").textContent = d.voiceName || "";
 }
 $("#igVoiceIn").onchange = $("#igVoiceIn2").onchange = async e => {
   const f = e.target.files[0]; e.target.value = ""; if(!f || !igCur) return; delete igCur.elPending; $("#igElPend").hidden = true;
   igSetVoice(f, URL.createObjectURL(f)); if(e.target.id === "igVoiceIn2") $("#igElSt").textContent = f.name + " · importé, inclus dans la vidéo"; $("#igVoiceName").textContent = f.name + " · enregistrement…";
-  try{ const as = await window.claude?.use?.("assets"); if(as){ const r = await as.upload(f); await igSave({voiceId:r.id, voiceName:f.name}); $("#igVoiceName").textContent = f.name + " · enregistrée"; } else $("#igVoiceName").textContent = f.name + " · gardée pour cette session"; }
-  catch(err){ $("#igVoiceName").textContent = f.name + " · gardée pour cette session (" + (err?.code || "enregistrement impossible") + ")"; }
+  try{ const r = await igAudioUp(f, f.name || "voix-off.mp3"); await igSave({voiceId:r.id, voiceEnc:r.enc, voiceName:f.name, voiceMode:igHasVoMode(igCur) ? igCur.voiceMode : "file"}); $("#igVoiceName").textContent = f.name + " · enregistrée"; }
+  catch(err){ $("#igVoiceName").textContent = f.name + " · gardée pour cette session seulement (" + (err?.code === "unavailable" ? "ouvrez le Studio sur claude.ai pour l'enregistrer" : err?.code || err?.message || "enregistrement impossible") + ")"; }
+  if(igMontage(igCur) && !igCur.vSound){ igCur.vSound = "mix"; igSave(); }
   await igFitVoice();
 };
+async function igAudioUp(blob, name){
+  const as = await window.claude?.use?.("assets").catch(() => null); if(!as) throw {code:"unavailable"};
+  try{ const r = await as.upload(new File([blob], name, {type:blob.type || "audio/mpeg"})); return {id:r.id, enc:""}; }
+  catch(e){ const r = await as.upload(new Blob([igB64(new Uint8Array(await blob.arrayBuffer()))], {type:"text/plain"}), {type:"text/plain"}); return {id:r.id, enc:"b64"}; }
+}
+async function igAudioGet(id, enc){
+  const r = await fetch("/_blob/" + id); if(!r.ok) throw new Error("HTTP " + r.status);
+  if(enc !== "b64") return r.blob();
+  const bin = atob((await r.text()).trim()), u = new Uint8Array(bin.length); for(let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  const b = new Blob([u]); return new Blob([u], {type:{mp3:"audio/mpeg", wav:"audio/wav", m4a:"audio/mp4", ogg:"audio/ogg", webm:"audio/webm", flac:"audio/flac"}[await igAudioExt(b)] || "audio/mpeg"});
+}
+/* the saved voice of an animation, read back as a file (works for both ways of storing it) */
+function igLoadVoice(d, after){
+  if(!d?.voiceId) return; igSetVoice(null, d.voiceEnc === "b64" ? "" : "/_blob/" + d.voiceId);
+  igAudioGet(d.voiceId, d.voiceEnc).then(b => { if(!igVoice || igCur?.voiceId !== d.voiceId) return; const url = URL.createObjectURL(b); igVoice.el.src = url; igVoice.url = url; igVoice.blob = b; after?.(); }).catch(() => {});
+}
 function igSetVoice(blob, url){ if(igVoice?.url?.startsWith("blob:")) URL.revokeObjectURL(igVoice.url); const el = new Audio(url); el.preload = "auto"; igVoice = {blob, url, el}; el.onloadedmetadata = igCheckVoiceLen; }
 function igCheckVoiceLen(){ if(igCur?.voiceSync) return; const d = igVoice?.el?.duration, tot = igTotal(igCur); if(d && isFinite(d) && Math.abs(d - tot) > 1.5) $("#igVoiceName").textContent += ` · la voix dure ${igFmt(d)}, l'animation ${igFmt(tot)} : ajustez les durées des scènes si besoin.`; }
 $("#igToVideo").onclick = () => igGo("video");
@@ -5280,11 +5301,12 @@ async function igRecordRun(st){
   const stream = $("#igCanvas").captureStream(30); let ac = null, src = null;
   try{
     const withMus = !!igCur.music?.id && !!(await igMusLoad(igCur.music).catch(() => null));
-    if(igFileVoice() && igVoice?.blob || withMus && !igVKeep(igCur)){ ac = new AudioContext(); const dest = ac.createMediaStreamDestination();
+    if(!igVKeep(igCur) && (igFileVoice() && igVoice?.blob || withMus)){ ac = new AudioContext(); const dest = ac.createMediaStreamDestination();
       if(igFileVoice() && igVoice?.blob){ const buf = await ac.decodeAudioData(await igVoice.blob.arrayBuffer()); src = ac.createBufferSource(); src.buffer = buf; src.connect(dest); }
       if(withMus){ const mus = {go:() => igMusStartOn(ac, dest, 0).then(h => { igRecMus = h; })}; const prev = src; src = {start:() => { prev?.start(); mus.go(); }, stop:() => { try{ prev?.stop(); }catch(e){} igRecMus?.stop(); }}; }
       dest.stream.getAudioTracks().forEach(tr => stream.addTrack(tr)); }
-    if(igVKeep(igCur)){ await igVidFit(igCur); const vd = igVidRoute(igCur); vd?.stream.getAudioTracks().forEach(tr => stream.addTrack(tr)); if(withMus && igVAC){ const prev = src; src = {start:() => { prev?.start(); igMusStartOn(igVAC, vd, 0, igVAC.destination).then(h => { igRecMus = h; }); }, stop:() => { try{ prev?.stop(); }catch(e){} igRecMus?.stop(); }}; } }
+    if(igVKeep(igCur)){ await igVidFit(igCur); const vd = igVidRoute(igCur); vd?.stream.getAudioTracks().forEach(tr => stream.addTrack(tr));
+      if(vd && igFileVoice() && igVoice?.blob){ const buf = await igVAC.decodeAudioData(await igVoice.blob.arrayBuffer()), vs = igVAC.createBufferSource(); vs.buffer = buf; vs.connect(vd); src = vs; } if(withMus && igVAC){ const prev = src; src = {start:() => { prev?.start(); igMusStartOn(igVAC, vd, 0, igVAC.destination).then(h => { igRecMus = h; }); }, stop:() => { try{ prev?.stop(); }catch(e){} igRecMus?.stop(); }}; } }
   }catch(e){ st.className = "status err"; st.textContent = "La voix n'a pas pu être lue : la vidéo sera muette."; }
   const types = ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
   const mime = types.find(t => MediaRecorder.isTypeSupported(t)) || "";
@@ -5316,7 +5338,7 @@ async function igRecordRun(st){
   igRenderAll();
 }
 const igPubTextOf = a => a ? (a.pubText ?? [a.caption, a.tags].filter(Boolean).join("\n\n")) : "";
-function igShowVideo(){ const v = $("#igVideo"), src = igVideo?.url || (igCur?.videoId ? "/_blob/" + igCur.videoId : ""); v.hidden = !src; $("#igVidEmpty").hidden = !!src; if(src && v.getAttribute("src") !== src) v.src = src;
+function igShowVideo(){ const v = $("#igVideo"), src = igVideo?.url || (igCur?.videoId ? "/_blob/" + igCur.videoId : ""); v.hidden = !src; $("#igVidEmpty").hidden = !!src; if(src && v.dataset.src !== src){ v.dataset.src = src; v.preload = "auto"; v.src = src + "#t=0.1"; }
   const box = $("#igVidActs"), opening = box.hidden && !!src; box.hidden = !src; if(document.activeElement !== $("#igPubText")) $("#igPubText").value = igPubTextOf(igCur); if(opening && igRec === null) setTimeout(() => box.scrollIntoView({behavior:"smooth", block:"center"}), 60); $("#igVidInfo").textContent = igCur?.videoType === "video/webm" || igVideo?.type === "video/webm" ? "Format WebM : Instagram l'accepte depuis un ordinateur ; sur téléphone, convertissez-le en MP4 si besoin." : ""; }
 $("#igDl").onclick = async () => {
   let blob = igVideo?.blob; if(!blob && igCur?.videoId){ try{ blob = await (await fetch("/_blob/" + igCur.videoId)).blob(); }catch(e){} }
@@ -5337,13 +5359,13 @@ $("#igElDl").onclick = async e => {
   e.preventDefault(); const st = $("#igElSt"), href = $("#igElDl").getAttribute("href") || "";
   let b = igVoice?.blob || null;
   if(!b && href){ try{ const r = await fetch(href); if(r.ok) b = await r.blob(); }catch(x){} }
-  if(!b && igCur?.voiceId){ try{ const r = await fetch("/_blob/" + igCur.voiceId); if(r.ok) b = await r.blob(); }catch(x){} }
+  if(!b && igCur?.voiceId){ try{ b = await igAudioGet(igCur.voiceId, igCur.voiceEnc); }catch(x){} }
   let fresh = href;
   /* the ElevenLabs link expires after a while: ask for a fresh one */
   if(!b && igCur?.elFlow && igCur?.elSids?.length && mcp){ st.className = "status"; st.textContent = "Récupération du fichier auprès d'ElevenLabs…";
     try{ const q = await elCall("creative_get_flow_run_status", {context:"Télécharger la voix off", flow_id:igCur.elFlow, session_ids:igCur.elSids}), m = q?.media?.find(x => x.kind === "audio"), g = q?.generations?.find(x => x.status === "completed");
       fresh = m?.url || m?.master_url || g?.content_url || href; if(fresh){ $("#igElDl").href = fresh; const r = await fetch(fresh); if(r.ok) b = await r.blob(); } }catch(x){} }
-  if(b && b.size && !igVoice?.blob){ igSetVoice(b, URL.createObjectURL(b)); }
+  if(b && b.size && !igVoice?.blob){ igSetVoice(b, URL.createObjectURL(b)); igAudioUp(b, "voix-off." + await igAudioExt(b)).then(up => { delete igCur.elPending; igCur.voiceName = String(igCur.voiceName || "Voix off").replace(" (à ajouter)", ""); $("#igElPend").hidden = true; return igSave({voiceId:up.id, voiceEnc:up.enc}).then(() => igFitVoice()); }).catch(() => {}); }
   if(!b || !b.size){ if(fresh){ window.open(fresh, "_blank", "noopener"); st.className = "status"; st.textContent = "Le navigateur bloque la récupération directe : le fichier s'ouvre dans un nouvel onglet (clic droit, « Enregistrer sous »). Sinon, « Ouvrir dans ElevenLabs » permet de le télécharger depuis votre compte."; return; } toast("Générez d'abord la voix"); return; }
   const ext = await igAudioExt(b); lpSaveFile(`voix-off-${igFileBase()}.${ext}`, b);
   if(ext !== "mp3"){ st.className = "status"; st.textContent = `Le fichier fourni est au format ${ext.toUpperCase()} (pas MP3) : il est enregistré avec la bonne extension pour s'ouvrir normalement.`; }
@@ -5446,7 +5468,7 @@ $("#igElGen").onclick = async () => {
       const b = await (await fetch(url)).blob(); if(!b.size) throw 0;
       igSetVoice(b, URL.createObjectURL(b)); $("#igVoiceName").textContent = name;
       $("#igElResHint").textContent = "La voix est calée sur le début de l'animation et sera incluse dans la vidéo.";
-      try{ const as = await window.claude?.use?.("assets"); if(as){ const up = await as.upload(new File([b], "voix-off.mp3", {type:b.type || "audio/mpeg"})); await igSave({voiceId:up.id, voiceName:name}); } }catch(e){}
+      try{ const up = await igAudioUp(b, "voix-off." + await igAudioExt(b)); await igSave({voiceId:up.id, voiceEnc:up.enc, voiceName:name}); }catch(e){}
       igCur.voiceName = name; delete igCur.elPending; await igFitVoice(dur); st.className = "status ok"; st.textContent = `${name}${dur ? " · " + igFmt(dur) : ""} · scènes calées sur la voix`;
     }catch(e){
       if(igVoice){ igVoice.el?.pause(); igVoice = null; } delete igCur.voiceId; igCur.voiceName = name + " (à ajouter)"; igCur.elPending = true; igCur.elText = text;
@@ -5544,7 +5566,7 @@ try{ const b = JSON.parse(localStorage.getItem("framboise-ig-brand") || "null");
 ["#igBrandName", "#igBrandHandle"].forEach(id => { $(id).addEventListener("input", () => { const b = igBrandField(); try{ localStorage.setItem("framboise-ig-brand", JSON.stringify(b || {})); }catch(e){} if(igCur){ igCur.brand = b; if(!igPlaying) igDrawAt(igPlayT); } }); $(id).addEventListener("change", () => { if(igCur) igSave(); }); });
 $("#igList").onclick = async e => {
   const o = e.target.closest("[data-igopen]"), d = e.target.closest("[data-igdel2]");
-  if(o){ igStop(); igElReset(); igCur = JSON.parse(JSON.stringify(igAll().find(x => x.id === o.dataset.igopen) || null)); igVideo = null; igVoice = null; if(igCur?.voiceId) igSetVoice(null, "/_blob/" + igCur.voiceId); if(igVoice && igCur.voiceId){ fetch(igVoice.url).then(r => r.blob()).then(b => { if(igVoice){ igVoice.blob = b; if(igCur?.voiceSync !== "audio") igFitVoice(); } }).catch(() => {}); } igGo(igCur?.videoId ? "video" : igCur?.status === "brouillon" ? "script" : "style"); }
+  if(o){ igStop(); igElReset(); igCur = JSON.parse(JSON.stringify(igAll().find(x => x.id === o.dataset.igopen) || null)); igVideo = null; igVoice = null; if(igCur?.voiceId) igLoadVoice(igCur, () => { if(igCur?.voiceSync !== "audio") igFitVoice(); }); igGo(igCur?.videoId ? "video" : igCur?.status === "brouillon" ? "script" : "style"); }
   if(d){ if(d.dataset.sure){ await del("ianims", d.dataset.igdel2); toast("Animation supprimée"); } else { d.dataset.sure = "1"; d.textContent = "Confirmer ?"; setTimeout(() => { if(d.isConnected){ delete d.dataset.sure; d.textContent = "Supprimer"; } }, 3000); } }
 };
 const igThumbCache = {};
